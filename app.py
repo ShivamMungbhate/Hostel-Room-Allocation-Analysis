@@ -9,7 +9,6 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-
 st.set_page_config(page_title="Hostel Room Allocation", page_icon="🏠", layout="wide")
 px.defaults.template = "plotly_dark"
 
@@ -33,7 +32,7 @@ hr { border-color:var(--line); }
 """, unsafe_allow_html=True)
 
 st.title("🏠 Hostel Room Allocation")
-st.caption("Upload your data, map its columns, and generate a random allocation that keeps gender groups in separate rooms.")
+st.caption("Upload hostel data, map its columns, and generate a random allocation that keeps each room to one gender group.")
 
 
 @st.cache_data(show_spinner=False)
@@ -49,12 +48,7 @@ def read_dataset(data: bytes, filename: str) -> pd.DataFrame:
                 delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
             except csv.Error:
                 delimiter = ","
-        return pd.read_csv(
-            BytesIO(data),
-            sep=delimiter,
-            encoding="utf-8-sig",
-            low_memory=False,
-        )
+        return pd.read_csv(BytesIO(data), sep=delimiter, encoding="utf-8-sig", low_memory=False)
 
     if extension == "xlsx":
         return pd.read_excel(BytesIO(data), engine="openpyxl")
@@ -63,29 +57,32 @@ def read_dataset(data: bytes, filename: str) -> pd.DataFrame:
         return pd.read_json(BytesIO(data), lines=True)
 
     if extension == "json":
-        content = json.loads(data.decode("utf-8-sig"))
-        return pd.json_normalize(content)
+        parsed = json.loads(data.decode("utf-8-sig"))
+        if isinstance(parsed, list):
+            return pd.json_normalize(parsed)
+        if isinstance(parsed, dict):
+            if parsed and all(isinstance(value, list) for value in parsed.values()):
+                return pd.DataFrame(parsed)
+            return pd.json_normalize(parsed)
+        raise ValueError("JSON must contain an object or a list of records.")
 
-    raise ValueError("Supported files: CSV, TSV, XLSX, JSON, and JSONL.")
+    raise ValueError("Supported formats are CSV, TSV, XLSX, JSON, and JSONL.")
 
 
 def normalize_name(value: object) -> str:
-    return "".join(ch for ch in str(value).strip().lower() if ch.isalnum())
+    return "".join(char for char in str(value).strip().lower() if char.isalnum())
 
 
 def guess_column(frame: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
     lookup = {normalize_name(column): column for column in frame.columns}
-
     for alias in aliases:
-        key = normalize_name(alias)
-        if key in lookup:
-            return lookup[key]
-
+        normalized_alias = normalize_name(alias)
+        if normalized_alias in lookup:
+            return lookup[normalized_alias]
     for column in frame.columns:
-        name = normalize_name(column)
-        if any(normalize_name(alias) in name for alias in aliases):
+        normalized = normalize_name(column)
+        if any(normalize_name(alias) in normalized for alias in aliases):
             return column
-
     return None
 
 
@@ -99,24 +96,21 @@ def pick_column(
     placeholder = "(skip)" if optional else "(select a column)"
     options = [placeholder] + list(frame.columns)
     suggestion = guess_column(frame, aliases)
-    default = options.index(suggestion) if suggestion in options else 0
-    selected = st.selectbox(label, options, index=default, key=key)
-    return None if selected == placeholder else selected
+    default_index = options.index(suggestion) if suggestion in options else 0
+    choice = st.selectbox(label, options, index=default_index, key=key)
+    return None if choice == placeholder else choice
 
 
 def clean_gender(value: object) -> str | None:
     if pd.isna(value):
         return None
-
     raw = str(value).strip().casefold()
     if not raw:
         return None
-
     if raw in {"m", "male", "man", "men", "boy", "boys"}:
         return "Male"
     if raw in {"f", "female", "woman", "women", "girl", "girls"}:
         return "Female"
-
     return raw[:1].upper() + raw[1:]
 
 
@@ -154,48 +148,50 @@ def allocate_rooms(
     else:
         rooms["Owner"] = pd.Series([None] * len(rooms), dtype="object")
 
+    # Occupied rooms with unknown residents' gender are not safe to use.
     rooms["Locked"] = (rooms["Occupied"] > 0) & rooms["Owner"].isna()
 
     students = student_data.copy().reset_index(drop=True)
     students["Student"] = students["Student"].astype("string").str.strip()
     students["GenderGroup"] = students["Gender"].map(clean_gender)
-    students = students[
-        students["Student"].notna() & (students["Student"] != "")
-    ].copy()
+    students = students[students["Student"].notna() & (students["Student"] != "")].copy()
 
     if students["Student"].duplicated().any():
         raise ValueError("Student identifiers must be unique.")
 
-    assigned_rows = []
-    unallocated_rows = []
+    assigned_rows: list[dict[str, object]] = []
+    unallocated_rows: list[dict[str, object]] = []
 
     missing_gender = students[students["GenderGroup"].isna()]
-    for row in missing_gender.itertuples(index=False):
+    for student in missing_gender.itertuples(index=False):
         unallocated_rows.append({
-            "Student_ID": row.Student,
+            "Student_ID": student.Student,
             "Gender": "Unknown",
             "Reason": "Missing gender",
         })
 
     valid_gender = students[students["GenderGroup"].notna()]
-    groups = [(gender, group.copy()) for gender, group in
-              valid_gender.groupby("GenderGroup", sort=False)]
+    groups = [
+        (gender, group.copy())
+        for gender, group in valid_gender.groupby("GenderGroup", sort=False)
+    ]
 
-    rng.shuffle(groups)
+    # Use permutation to randomize the groups without mutating a read-only array.
+    groups = [groups[index] for index in rng.permutation(len(groups))]
     groups.sort(key=lambda item: -len(item[1]))
 
     for gender, group in groups:
-        candidates = rooms.index[
-            (~rooms["Locked"])
-            & (rooms["Available"] > 0)
-            & (rooms["Owner"].isna() | (rooms["Owner"] == gender))
-        ].to_numpy()
+        candidates = rng.permutation(
+            rooms.index[
+                (~rooms["Locked"])
+                & (rooms["Available"] > 0)
+                & (rooms["Owner"].isna() | (rooms["Owner"] == gender))
+            ].to_numpy(copy=True)
+        )
 
-        rng.shuffle(candidates)
         remaining = len(group)
-        selected_rooms = []
+        selected_rooms: list[int] = []
 
-        
         while remaining > 0 and len(candidates):
             capacities = rooms.loc[candidates, "Available"].to_numpy(dtype=int)
             fitting = np.flatnonzero(capacities >= remaining)
@@ -213,8 +209,12 @@ def allocate_rooms(
         for room_index in selected_rooms:
             rooms.at[room_index, "Owner"] = gender
 
-        shuffled_students = group.iloc[rng.permutation(len(group))].reset_index(drop=True)
-        seat_rooms = []
+        shuffled_students = group.iloc[
+            rng.permutation(len(group))
+        ].reset_index(drop=True)
+
+        # Build the room-seat list before randomizing or iterating over it.
+        seat_rooms: list[int] = []
         seats_needed = len(shuffled_students)
 
         for room_index in selected_rooms:
@@ -224,7 +224,7 @@ def allocate_rooms(
             if seats_needed == 0:
                 break
 
-        rng.shuffle(seat_rooms)
+        seat_rooms = list(rng.permutation(seat_rooms))
 
         for position, room_index in enumerate(seat_rooms):
             student = shuffled_students.iloc[position]
@@ -268,27 +268,27 @@ with st.sidebar:
         "How is your data organized?",
         ["One combined dataset", "Separate datasets"],
     )
-    file_types = ["csv", "tsv", "xlsx", "json", "jsonl"]
+    supported_types = ["csv", "tsv", "xlsx", "json", "jsonl"]
 
     if mode == "One combined dataset":
-        combined_file = st.file_uploader("Upload dataset", type=file_types)
+        combined_file = st.file_uploader("Upload dataset", type=supported_types)
         room_file = None
         student_file = None
     else:
         combined_file = None
-        room_file = st.file_uploader("Room inventory", type=file_types)
-        student_file = st.file_uploader("Student roster", type=file_types)
+        room_file = st.file_uploader("Room inventory", type=supported_types)
+        student_file = st.file_uploader("Student roster", type=supported_types)
 
-    st.caption("Supported: CSV, TSV, XLSX, JSON, and JSONL.")
-    st.caption("The app needs room ID and capacity, plus student ID and gender.")
+    st.caption("Supported: CSV, TSV, Excel (.xlsx), JSON, and JSON Lines (.jsonl).")
+    st.caption("Allocation needs room ID/capacity and student ID/gender fields.")
 
 
 if mode == "One combined dataset":
     if combined_file is None:
         st.info(
-            "For one-file mode, use a table with one row per student and columns "
-            "for student ID, gender, room, and room capacity. The app will "
-            "reassign those students randomly."
+            "Upload one table with one row per student and columns for student ID, "
+            "gender, room ID, and room capacity. Existing room assignments will "
+            "be replaced with new random assignments."
         )
         st.stop()
 else:
@@ -323,28 +323,39 @@ with st.expander("Map your columns", expanded=True):
     with room_panel:
         st.markdown("**Room fields**")
         room_id_col = pick_column(
-            room_frame, "Room identifier",
-            ("room_no", "room_number", "room", "room_id"), "room_id",
+            room_frame,
+            "Room identifier",
+            ("room_no", "room_number", "room", "room_id"),
+            "room_id",
         )
         capacity_col = pick_column(
-            room_frame, "Room capacity",
-            ("capacity", "room_capacity", "beds"), "capacity",
+            room_frame,
+            "Room capacity",
+            ("capacity", "room_capacity", "beds"),
+            "capacity",
         )
         block_col = pick_column(
-            room_frame, "Block / building",
-            ("block", "building", "wing"), "block", optional=True,
+            room_frame,
+            "Block / building",
+            ("block", "building", "wing"),
+            "block",
+            optional=True,
         )
 
         if mode == "Separate datasets":
             occupancy_col = pick_column(
-                room_frame, "Current occupancy",
+                room_frame,
+                "Current occupancy",
                 ("current_occupancy", "occupancy", "occupied"),
-                "occupancy", optional=True,
+                "occupancy",
+                optional=True,
             )
             resident_gender_col = pick_column(
-                room_frame, "Current residents' gender",
+                room_frame,
+                "Current residents' gender",
                 ("resident_gender", "occupant_gender", "room_gender", "gender"),
-                "resident_gender", optional=True,
+                "resident_gender",
+                optional=True,
             )
         else:
             occupancy_col = None
@@ -353,18 +364,23 @@ with st.expander("Map your columns", expanded=True):
     with student_panel:
         st.markdown("**Student fields**")
         student_id_col = pick_column(
-            student_frame, "Student ID / unique identifier",
-            ("student_id", "studentid", "roll_no", "roll_number",
-             "registration_no", "reg_no", "id"),
+            student_frame,
+            "Student ID / unique identifier",
+            ("student_id", "studentid", "roll_no", "roll_number", "registration_no", "reg_no", "id"),
             "student_id",
         )
         gender_col = pick_column(
-            student_frame, "Student gender",
-            ("gender", "sex"), "student_gender",
+            student_frame,
+            "Student gender",
+            ("gender", "sex"),
+            "student_gender",
         )
         name_col = pick_column(
-            student_frame, "Student name",
-            ("student_name", "name"), "student_name", optional=True,
+            student_frame,
+            "Student name",
+            ("student_name", "name"),
+            "student_name",
+            optional=True,
         )
 
 
@@ -389,6 +405,7 @@ if mode == "One combined dataset":
     room_data = room_data.rename(columns={room_id_col: "Room", capacity_col: "Capacity"})
     if block_col:
         room_data = room_data.rename(columns={block_col: "Block"})
+    # In combined mode, all listed students are being reassigned.
     room_data["Occupied"] = 0
 else:
     room_data = pd.DataFrame({
@@ -401,13 +418,13 @@ else:
     if resident_gender_col:
         room_data["ResidentGender"] = room_frame[resident_gender_col]
 
-
 student_data = pd.DataFrame({
     "Student": student_frame[student_id_col],
     "Gender": student_frame[gender_col],
 })
 if name_col:
     student_data["Name"] = student_frame[name_col]
+
 
 total_beds = pd.to_numeric(room_data["Capacity"], errors="coerce").fillna(0).sum()
 metrics = st.columns(4)
@@ -418,12 +435,9 @@ metrics[3].metric("Gender groups", f"{student_data['Gender'].map(clean_gender).n
 
 with st.expander("Preview data", expanded=False):
     st.caption("Showing up to 300 rows from each dataset.")
-    if mode == "One combined dataset":
-        st.dataframe(room_frame.head(300), use_container_width=True, hide_index=True)
-    else:
-        st.dataframe(room_frame.head(300), use_container_width=True, hide_index=True)
+    st.dataframe(room_frame.head(300), use_container_width=True, hide_index=True)
+    if mode == "Separate datasets":
         st.dataframe(student_frame.head(300), use_container_width=True, hide_index=True)
-
 
 seed = st.number_input(
     "Random seed (change it for a different allocation)",
@@ -441,7 +455,7 @@ if st.button("Generate random allocation", type="primary", use_container_width=T
 
         if assignments.empty:
             st.session_state.pop("assignments", None)
-            st.error("No students could be safely allocated. Check the data and available capacity.")
+            st.error("No students could be safely allocated. Check your data and available capacity.")
         elif assignments.groupby("Room_No")["Gender"].nunique().gt(1).any():
             st.error("Safety check failed. No allocation was saved.")
         else:
@@ -503,7 +517,7 @@ if "assignments" in st.session_state:
         st.dataframe(assignments.head(1000), use_container_width=True, hide_index=True)
 
     with st.expander("Room summary"):
-        st.caption("Showing at most 1,000 rows; the download contains the full summary.")
+        st.caption("Showing up to 1,000 rooms; the download includes the full summary.")
         st.dataframe(room_summary.head(1000), use_container_width=True, hide_index=True)
 
     if not unallocated.empty:
