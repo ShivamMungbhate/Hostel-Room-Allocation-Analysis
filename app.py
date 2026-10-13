@@ -15,12 +15,75 @@ st.set_page_config(
 
 REQUIRED = {"Room_No", "Student_ID", "Capacity", "Year", "Gender"}
 
+px.defaults.template = "plotly_dark"
+
 st.markdown("""
 <style>
-    .block-container { padding-top: 2rem; padding-bottom: 3rem; }
-    [data-testid="stMetric"] { background: #f6f8fc; border: 1px solid #e8edf5; padding: 1rem; border-radius: 12px; }
-    [data-testid="stSidebar"] { background: #f8f9fc; }
-    .intro { color: #637083; margin-top: -0.6rem; }
+    :root {
+        color-scheme: dark;
+        --app-bg: #0b1120;
+        --panel-bg: #121c2e;
+        --panel-raised: #172338;
+        --border: #26344b;
+        --text-primary: #e8eef8;
+        --text-muted: #9aabc2;
+        --accent: #72a7ff;
+    }
+
+    .stApp {
+        background: radial-gradient(ellipse at 50% -15%, #172844 0%, var(--app-bg) 55%);
+        color: var(--text-primary);
+    }
+    .block-container { max-width: 1440px; padding-top: 2.2rem; padding-bottom: 3rem; }
+    h1, h2, h3 { color: #f3f7ff; letter-spacing: -0.025em; }
+    h1 { font-weight: 700; }
+    .intro { color: var(--text-muted); margin-top: -0.6rem; font-size: 1.05rem; }
+
+    [data-testid="stSidebar"] {
+        background: #0e1727;
+        border-right: 1px solid var(--border);
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stCaptionContainer"] { color: var(--text-muted); }
+    [data-testid="stMetric"] {
+        background: linear-gradient(145deg, #17243a, #111b2c);
+        border: 1px solid #2a3a54;
+        border-radius: 14px;
+        padding: 1.05rem 1.15rem;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, .18);
+    }
+    [data-testid="stMetricLabel"] { color: #a9bad1; }
+    [data-testid="stMetricValue"] { color: #f3f7ff; font-weight: 700; }
+
+    [data-testid="stFileUploader"] section,
+    [data-testid="stDataFrame"],
+    [data-testid="stTable"] {
+        background: var(--panel-bg);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+    }
+    [data-testid="stFileUploader"] button,
+    [data-testid="stDownloadButton"] button {
+        border-radius: 9px;
+        border: 1px solid #41659a;
+        background: #1c3558;
+        color: #eaf2ff;
+    }
+    [data-testid="stFileUploader"] button:hover,
+    [data-testid="stDownloadButton"] button:hover {
+        border-color: var(--accent);
+        background: #254774;
+        color: white;
+    }
+    [data-testid="stAlert"] { border-radius: 12px; }
+    [data-testid="stExpander"] {
+        background: rgba(18, 28, 46, .7);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+    }
+    [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"] { gap: 1rem; }
+    hr { border-color: var(--border); }
+    * { scrollbar-color: #344762 #0b1120; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -153,4 +216,5 @@ with st.expander("Source data", expanded=False):
 csv = rooms.to_csv(index=False).encode("utf-8")
 st.download_button("Download room summary", data=csv, file_name="room_allocation_summary.csv", mime="text/csv")
 st.caption("Allocation is counted by unique student ID within each room. Utilization uses the highest listed capacity for that room.")
+
 
